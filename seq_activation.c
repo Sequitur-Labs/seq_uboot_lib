@@ -1,0 +1,594 @@
+#include <common.h>
+#include <malloc.h>
+#include <memalign.h>
+#include <asm/io.h>
+#include <seq_boot_manifests.h>
+#include <seq_boot.h>
+#include <seq_activation.h>
+#include <hw_sha.h>
+#include <u-boot/sha256.h>
+//#include <u-boot/sha512.h>
+#include <seq_cipher.h>
+#include <seq_ecc_utils.h>
+#include <spl.h>
+
+extern void seq_print_bytes( uint8_t *data, uint32_t len);
+
+/* Uncomment any of the following to enable testing of the necessary crypto. */
+//#define DO_HASH_TESTS
+//#define DO_AES_TESTS
+
+#define SEQ_SHA1LEN_BYTES 20
+#define SEQ_SHA256LEN_BYTES 32
+#define SEQ_SHA384LEN_BYTES 48
+#define SEQ_SHA512LEN_BYTES 64
+#define SEQ_TPMEVTLOGLEN_BYTES 512
+
+/* The following is for defining the algorithm used for the event log
+ * hashes.  The default is SHA512. */
+
+#if (CONFIG_CORETEE_TPMEVTLOGHASH_SIZE == 256)
+#define SEQ_TPMEVTLOGHASH_FUNC hw_sha256
+#define SEQ_TPMEVTLOGHASH_BYTES SEQ_SHA256LEN_BYTES
+#elif (CONFIG_CORETEE_TPMEVTLOGHASH_SIZE == 384)
+#define SEQ_TPMEVTLOGHASH_FUNC hw_sha384
+#define SEQ_TPMEVTLOGHASH_BYTES SEQ_SHA384LEN_BYTES
+#else
+#define SEQ_TPMEVTLOGHASH_FUNC hw_sha512
+#define SEQ_TPMEVTLOGHASH_BYTES SEQ_SHA512LEN_BYTES
+#endif
+
+#define MAX_SEEDLEN 48
+#define MAX_KEYLEN 32
+#define RESEED_INTERVAL (1ULL << MAX_SEEDLEN)
+#ifndef AES_BLOCK_SIZE
+# define AES_BLOCK_SIZE 16
+#endif
+
+static int hw_aes_ecb_enc(uint8_t *key, size_t keylen, uint8_t *in, size_t inlen, uint8_t *out)
+{
+	/* Returns 0 on success. Accepts one block of data in and out. */
+	return seq_enc_aes_ecb(key, keylen, in, out, inlen);
+}
+
+#ifdef DO_AES_TESTS
+static int hw_aes_ecb_dec(uint8_t *key, size_t keylen, uint8_t *in, size_t inlen, uint8_t *out)
+{
+	/* Returns 0 on success. Accepts one block of data in and out. */
+	return seq_dec_aes_ecb(key, keylen, in, out, inlen);
+}
+
+static int hw_aes_cbc_enc(const uchar *key_addr, uint keylen, uchar *iv,
+	           const uchar *in_addr, uint buflen, uchar *out_addr)
+{
+	return seq_enc_aes_cbc(key_addr, keylen, in_addr, out_addr, buflen, iv);
+}
+
+static int hw_aes_cbc_dec(const uchar *key_addr, uint keylen, uchar *iv,
+	           const uchar *in_addr, uint buflen, uchar *out_addr)
+{
+	return seq_dec_aes_cbc(key_addr, keylen, in_addr, out_addr, buflen, iv);
+}
+
+static int hw_aes_ctr_enc(const uchar *key_addr, uint keylen, uchar *iv,
+	           const uchar *in_addr, uint buflen, uchar *out_addr)
+{
+	return seq_enc_aes_ctr(key_addr, keylen, in_addr, out_addr, buflen, iv);
+}
+
+static int hw_aes_ctr_dec(const uchar *key_addr, uint keylen, uchar *iv,
+	           const uchar *in_addr, uint buflen, uchar *out_addr)
+{
+	return seq_dec_aes_ctr(key_addr, keylen, in_addr, out_addr, buflen, iv);
+}
+#endif
+
+int fetch_hashes( SeqBootPlexInfo *current_plex,
+                 uint8_t *mb2_hash, uint8_t *tos_hash)
+{
+	int res = 0;
+	uint8_t *out = NULL;
+	size_t outlen = SEQ_TPMEVTLOGHASH_BYTES;
+
+	if (!(out = malloc_cache_aligned(outlen)))
+		return -1;
+
+	SEQ_TPMEVTLOGHASH_FUNC((const uchar*)(current_plex->coretee.ramaddr), current_plex->coretee.ramlength, out, 0);
+	memcpy(tos_hash, out, outlen);
+
+	SEQ_TPMEVTLOGHASH_FUNC((const uchar*)(current_plex->atf.ramaddr), current_plex->atf.ramlength, out, 0);
+	memcpy(mb2_hash, out, outlen);
+
+	free(out);
+	return res;
+}
+
+typedef struct {
+	uint8_t tpm_evt_log[SEQ_TPMEVTLOGLEN_BYTES];
+	size_t tpm_evt_log_len;
+} FTPM_DATA;
+
+static int update_node_evt_log(void *fdt, int node, FTPM_DATA *ftpm_data) {
+	/* Address must be in two cells, and size in one */
+	int res;
+	uint64_t addr64;
+	uint32_t size32;
+	fdt32_t addrs[2], size[1];
+
+	addr64 = (uint64_t)(uintptr_t)ftpm_data->tpm_evt_log;
+	size32 = (uint32_t)ftpm_data->tpm_evt_log_len;
+
+	addrs[0] = cpu_to_fdt32(addr64 >> 32);
+	addrs[1] = cpu_to_fdt32(addr64);
+	size[0] = cpu_to_fdt32(size32);
+	res = fdt_setprop(fdt, node, "tpm_event_log_addr", addrs, sizeof(addrs));
+	if (!res)
+		res = fdt_setprop(fdt, node, "tpm_event_log_size", size, sizeof(size));
+
+	return res;
+}
+
+static int update_dt(FTPM_DATA *ftpm_data, void *fdt, int fdt_size) {
+	/* Don't know if the fTPM-related nodes have been added already or not,
+	 * so we handle either case. */
+	int res;
+	int rm_node, node;
+	static const char res_mem[] = "reserved-memory";
+	static const char tpm_evt_log_str[] = "arm,tpm_event_log";
+
+	/* Handle the "reserved-memory" node */
+	printf("Handling reserved-memory...\n");
+	rm_node = fdt_find_or_add_subnode(fdt, 0, res_mem);
+	if (rm_node < 0) {
+		printf("Failed to find/add: %s\n", res_mem);
+		return -1;
+	}
+
+	/* Handle the tpm-event-log */
+	node = fdt_find_or_add_subnode(fdt, rm_node, "tpm-event-log@0");
+	if (node < 0) {
+		printf("Failed to find/add: %s\n", "tpm-event-log@0");
+		return -1;
+	}
+	if ((res = fdt_setprop(fdt, node, "compatible", tpm_evt_log_str, sizeof(tpm_evt_log_str))))
+		return res;
+	if ((res = update_node_evt_log(fdt, node, ftpm_data)))
+		return res;
+
+	res = fdt_shrink_to_minimum(fdt, 0);
+
+	return (res < 0) ? -1 : 0;
+}
+
+#define EV_POST_CODE 0x00000001
+#define EV_NO_ACTION 0x00000003
+#define TCG_EFI_SPEC_ID_EVENT_SIGNATURE_EVENT_03 "Spec ID Event03"
+#define TCG_EFI_SPEC_ID_EVENT_SPEC_VERSION_MAJOR 2
+#define TCG_EFI_SPEC_ID_EVENT_SPEC_VERSION_MINOR 0
+#define TCG_EFI_SPEC_ID_EVENT_SPEC_VERSION_ERRATA 2
+#define TCG_EFI_UINTN_32 0x01
+#define TCG_EFI_UINTN_64 0x02
+#define TPM_ALG_ID_SHA256 0x000B
+#define TPM_ALG_ID_SHA384 0x000C
+#define TPM_ALG_ID_SHA512 0x000D
+#if (CONFIG_CORETEE_TPMEVTLOGHASH_SIZE == 256)
+#define TPM_ALG_ID TPM_ALG_ID_SHA256
+#elif (CONFIG_CORETEE_TPMEVTLOGHASH_SIZE == 384)
+#define TPM_ALG_ID TPM_ALG_ID_SHA384
+#else
+#define TPM_ALG_ID TPM_ALG_ID_SHA512
+#endif
+
+/* Integer values in the event log must be in Little-Endian byte order */
+static int wu8(uint8_t *p, uint8_t *pmax, uint8_t val) {
+	int size = sizeof(val);
+	if (pmax < (p+size))
+		return -1;
+	*p = val;
+	return size;
+}
+
+static int wu16(uint8_t *p, uint8_t *pmax, uint16_t val) {
+	int size = sizeof(val);
+	if (pmax < (p+size))
+		return -1;
+	memcpy(p, &val, size);
+	return size;
+}
+
+static int wu32(uint8_t *p, uint8_t *pmax, uint32_t val) {
+	int size = sizeof(val);
+	if (pmax < (p+size))
+		return -1;
+	memcpy(p, &val, size);
+	return size;
+}
+
+static int wdata(uint8_t *p, uint8_t *pmax, void *data, size_t len) {
+	if (pmax < (p+len))
+		return -1;
+	memcpy(p, data, len);
+	return len;
+}
+
+static int create_tpm_evt_log(FTPM_DATA *ftpm_data, uint8_t *mb2_hash,
+                              uint8_t *tos_hash) {
+	int res = 0;
+	uint8_t *p = ftpm_data->tpm_evt_log;
+	uint8_t *pmax = p + sizeof(ftpm_data->tpm_evt_log);
+	uint8_t *p_event_size;
+	size_t event_size = 0;
+	uint8_t sha1_zeroes[SEQ_SHA1LEN_BYTES] = { 0 };
+	char sig[] = TCG_EFI_SPEC_ID_EVENT_SIGNATURE_EVENT_03;
+	char mb2_evt[] = "u-boot";
+	char tos_evt[] = "coretee";
+
+#define ADDCHECKU(base, val) if ((res = wu##base(p, pmax, (val))) != -1) { p += res; } else { goto done; }
+#define ADDCHECKD(val, len) if ((res = wdata(p, pmax, (val), (len))) != -1) { p += res; } else { goto done; }
+
+	/* First, we create the header */
+	ADDCHECKU(32, 0);	//PCRIndex
+	ADDCHECKU(32, EV_NO_ACTION);	//EventType
+	ADDCHECKD(sha1_zeroes, SEQ_SHA1LEN_BYTES);	//Digest
+	p_event_size = p;	/* Save this location so we can update the size later. */
+	ADDCHECKU(32, 0);	//EventSize placeholder
+	ADDCHECKD(sig, sizeof(sig));	//signature
+	ADDCHECKU(32, 0);	//platformClass  XXXXX get correct data
+	ADDCHECKU(8, TCG_EFI_SPEC_ID_EVENT_SPEC_VERSION_MINOR);	//specVersionMinor
+	ADDCHECKU(8, TCG_EFI_SPEC_ID_EVENT_SPEC_VERSION_MAJOR);	//specVersionMajor
+	ADDCHECKU(8, TCG_EFI_SPEC_ID_EVENT_SPEC_VERSION_ERRATA);	//specErrata
+	ADDCHECKU(8, TCG_EFI_UINTN_32);	//uintnSize
+	ADDCHECKU(32, 1);	//numberOfAlgorithms (one only)
+	ADDCHECKU(16, TPM_ALG_ID);
+	ADDCHECKU(16, SEQ_TPMEVTLOGHASH_BYTES);
+	ADDCHECKU(8, 0); //vendorInfoSize (none provided)
+	if (p > (p_event_size + sizeof(uint32_t)))
+		event_size = p - (p_event_size + sizeof(uint32_t));
+	(void)wu32(p_event_size, pmax, event_size);	//EventSize proper
+
+	/* Write the MB2 event log entry */
+	ADDCHECKU(32, 0);	//PCRIndex
+	ADDCHECKU(32, EV_POST_CODE);	//EventType
+	ADDCHECKU(32, 1);	//Digests.Count
+	ADDCHECKU(16, TPM_ALG_ID);
+	ADDCHECKD(mb2_hash, SEQ_TPMEVTLOGHASH_BYTES);
+	ADDCHECKU(32, sizeof(mb2_evt));	//EventSize
+	ADDCHECKD(mb2_evt, sizeof(mb2_evt)); //Event data
+
+	/* Write the MB2 event log entry */
+	ADDCHECKU(32, 0);	//PCRIndex
+	ADDCHECKU(32, EV_POST_CODE);	//EventType
+	ADDCHECKU(32, 1);	//Digests.Count
+	ADDCHECKU(16, TPM_ALG_ID);
+	ADDCHECKD(tos_hash, SEQ_TPMEVTLOGHASH_BYTES);
+	ADDCHECKU(32, sizeof(tos_evt));	//EventSize
+	ADDCHECKD(tos_evt, sizeof(tos_evt)); //Event data
+	res = 0;
+
+#undef ADDCHECKU
+#undef ADDCHECKD
+
+	ftpm_data->tpm_evt_log_len = p - ftpm_data->tpm_evt_log;
+
+done:
+  if (res)
+		printf("Error: truncated tpm_event log\n");
+	return res;
+}
+
+
+#ifdef DO_HASH_TESTS
+static uint8_t expected_sha1[] = { 0xe4, 0x31, 0x57, 0xaa, 0x2b, 0xd6, 0xf7, 0xe9, 0xc7, 0x97, 0xea, 0x49, 0x44, 0x1e, 0xb9, 0xef, 0x39, 0xb5, 0xa4, 0x22 };
+static uint8_t expected_sha256[] = { 0x75, 0x95, 0xaf, 0x82, 0xae, 0x2f, 0xa5, 0x9c, 0xd9, 0xbf, 0x3b, 0x44, 0x05, 0xd3, 0x1c, 0x69, 0xb9, 0x8d, 0xe7, 0x1f, 0xed, 0x59, 0x45, 0xfd, 0x77, 0x7d, 0x8a, 0xb3, 0xb3, 0x93, 0xa8, 0x5f };
+static uint8_t expected_sha384[] = { 0xf7, 0x6a, 0xea, 0xd8, 0x06, 0xaa, 0x5b, 0x50, 0x18, 0xae, 0xf8, 0xd2, 0xf9, 0xb6, 0x41, 0x43, 0x45, 0x2d, 0xc0, 0x0c, 0x9a, 0x42, 0x70, 0x01, 0x5b, 0x67, 0x6c, 0x19, 0x7e, 0x5e, 0xe7, 0xb7, 0x35, 0x18, 0x72, 0x0a, 0xe6, 0xf6, 0x28, 0xf4, 0x55, 0x62, 0xe0, 0x1c, 0x15, 0x99, 0x7a, 0x87 };
+static uint8_t expected_sha512[] = { 0x31, 0xbc, 0x67, 0xaf, 0xa5, 0xe5, 0x7c, 0xa1, 0xcc, 0xec, 0xab, 0xfd, 0x48, 0xf3, 0x98, 0x54, 0x58, 0x33, 0x61, 0x57, 0x1f, 0x14, 0x77, 0x4e, 0x59, 0x51, 0xed, 0x71, 0xf7, 0xbe, 0x87, 0x08, 0x2e, 0x5d, 0x18, 0xe7, 0xca, 0x5f, 0xa9, 0x20, 0x74, 0x92, 0x79, 0x97, 0x0c, 0x92, 0x6e, 0x2d, 0x77, 0x8b, 0x71, 0x3a, 0xef, 0xf8, 0xe8, 0x02, 0x51, 0xe2, 0xe5, 0x4d, 0x7e, 0x60, 0x20, 0x62 };
+
+static void run_hash_tests(void) {
+	int res;
+	struct hash_algo *algo;
+	void *ctx;
+	uint8_t *in = NULL, *out = NULL;
+	const size_t inlen = 150, outlen = 256;
+
+	if (!(in = malloc_cache_aligned(inlen))) {
+		printf("Could not allocate input buffer\n");
+		goto done;
+	}
+	if (!(out = malloc_cache_aligned(outlen))) {
+		printf("Could not allocate input buffer\n");
+		goto done;
+	}
+
+	memset(in, 'a', inlen);
+
+	printf("\nRunning HW accelerated hash tests...\n");
+	printf("Computing SHA1 hash for 150 bytes...");
+	hw_sha1(in, inlen, out, 0);
+	if (!memcmp(out, expected_sha1, sizeof(expected_sha1)))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(expected_sha1, sizeof(expected_sha1));
+		printf("computed out =\n");
+		seq_print_bytes(out, sizeof(expected_sha1));
+	}
+	printf("Computing SHA1 hash for 63+87 bytes...");
+	if (!(res = hash_lookup_algo("sha1", &algo))) {
+		if (!(res = hw_sha_init(algo, &ctx))) {
+	    		if (!(res = hw_sha_update(algo, ctx, in, 63, 0)) &&
+			    !(res = hw_sha_update(algo, ctx, in+63, inlen-63, 1)) &&
+			    !(res = hw_sha_finish(algo, ctx, out, outlen))) {
+				if (!res && !memcmp(out, expected_sha1, sizeof(expected_sha1)))
+					printf("Success!\n");
+				else {
+					printf("Failure!\n");
+					printf("expected out =\n");
+					seq_print_bytes(expected_sha1, sizeof(expected_sha1));
+					printf("computed out =\n");
+					seq_print_bytes(out, sizeof(expected_sha1));
+				}
+			} else
+				printf("Update/final for SHA1 failed\n");
+		} else
+			printf("Init for SHA1 failed\n");
+	} else
+		printf("Algo lookup for SHA1 failed\n");
+	printf("Computing SHA256 hash for 150 bytes...");
+	hw_sha256(in, inlen, out, 0);
+	if (!memcmp(out, expected_sha256, sizeof(expected_sha256)))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(expected_sha256, sizeof(expected_sha256));
+		printf("computed out =\n");
+		seq_print_bytes(out, sizeof(expected_sha256));
+	}
+	printf("Computing SHA384 hash for 150 bytes...");
+	hw_sha384(in, inlen, out, 0);
+	if (!memcmp(out, expected_sha384, sizeof(expected_sha384)))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(expected_sha384, sizeof(expected_sha384));
+		printf("computed out =\n");
+		seq_print_bytes(out, sizeof(expected_sha384));
+	}
+	printf("Computing SHA512 hash for 150 bytes...");
+	hw_sha512(in, inlen, out, 0);
+	if (!memcmp(out, expected_sha512, sizeof(expected_sha512)))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(expected_sha512, sizeof(expected_sha512));
+		printf("computed out =\n");
+		seq_print_bytes(out, sizeof(expected_sha512));
+	}
+	printf("...HW accelerated hash tests done\n\n");
+done:
+	free(in);
+	free(out);
+}
+#endif
+
+
+#ifdef DO_AES_TESTS
+#define AES_DATA_LEN 128
+// All tests use "aaaa..." for key, IV and input data, with 128 bytes of input
+static uint8_t expected_ecb_128[] = { 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53, 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53, 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53, 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53, 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53, 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53, 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53, 0x51, 0x88, 0xc6, 0x47, 0x4b, 0x22, 0x8c, 0xbd, 0xd2, 0x42, 0xe9, 0x12, 0x5e, 0xbe, 0x1d, 0x53 };
+static uint8_t expected_ecb_192[] = { 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99, 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99, 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99, 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99, 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99, 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99, 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99, 0xb6, 0x07, 0x00, 0x28, 0x4e, 0xcb, 0xa5, 0x9f, 0xa2, 0x49, 0x62, 0xd0, 0x0c, 0xf9, 0xc2, 0x99 };
+static uint8_t expected_ecb_256[] = { 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff, 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff, 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff, 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff, 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff, 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff, 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff, 0x2c, 0xcd, 0x45, 0x89, 0x6f, 0xc3, 0x52, 0x5e, 0x03, 0xc7, 0xcb, 0x97, 0xb6, 0x68, 0x95, 0xff };
+static uint8_t expected_cbc_128[] = { 0xdc, 0x3a, 0x2c, 0x49, 0xaa, 0x38, 0x5b, 0x0c, 0x67, 0x42, 0xd9, 0xc3, 0x2b, 0x18, 0x12, 0x15, 0xad, 0xfe, 0x05, 0x23, 0x3b, 0xc8, 0xa1, 0xec, 0x7d, 0x10, 0xd5, 0x8f, 0xde, 0x31, 0x1b, 0x8a, 0x3f, 0x40, 0x1c, 0xd2, 0x23, 0x00, 0x32, 0x31, 0x9a, 0xf5, 0x67, 0x09, 0x8a, 0xe7, 0x6a, 0x50, 0xdf, 0xf5, 0x76, 0xa4, 0x40, 0x6a, 0x86, 0x40, 0xce, 0xcc, 0x40, 0xc6, 0xf4, 0xc6, 0xf0, 0x9b, 0x22, 0x66, 0x2e, 0xd6, 0x40, 0xef, 0xbe, 0x72, 0xbd, 0x3e, 0xfd, 0x66, 0x0e, 0x2b, 0x22, 0xd3, 0x1f, 0x90, 0xba, 0x4d, 0xc3, 0xc0, 0x75, 0xfc, 0x87, 0x6f, 0xc0, 0xf1, 0x6e, 0xce, 0x3e, 0xed, 0x4a, 0x3d, 0x8f, 0x59, 0x0f, 0x81, 0xdf, 0xf9, 0x9d, 0xbd, 0x6e, 0x5b, 0x5d, 0xcc, 0x26, 0x8b, 0x9a, 0x75, 0xc2, 0xe9, 0x6b, 0x56, 0x7a, 0x18, 0xa7, 0x27, 0x65, 0x9e, 0x14, 0xd4, 0x9b, 0x50 };
+static uint8_t expected_cbc_192[] = { 0xef, 0x1c, 0xe1, 0x70, 0x49, 0xf5, 0xcc, 0xb6, 0x3c, 0x1a, 0xa2, 0xd5, 0x03, 0xb3, 0xbd, 0xae, 0x3d, 0x67, 0xa0, 0x13, 0x2b, 0xd1, 0x55, 0x82, 0xeb, 0x6a, 0xcd, 0xe9, 0x99, 0x77, 0x15, 0xa7, 0x8f, 0x33, 0x1e, 0x08, 0x72, 0xae, 0x93, 0x32, 0xda, 0xe1, 0x80, 0x7d, 0x25, 0x1b, 0x77, 0xb3, 0x25, 0x3f, 0x98, 0x6e, 0x74, 0xda, 0xcc, 0xdf, 0x3d, 0xaf, 0xe0, 0x94, 0x8d, 0xa9, 0x14, 0xda, 0xb5, 0xf5, 0xff, 0x8d, 0x0f, 0xbc, 0x14, 0x2b, 0x7a, 0x1f, 0x33, 0x39, 0x56, 0xf3, 0x96, 0xd4, 0xa2, 0x8b, 0x27, 0xaa, 0x01, 0x55, 0x7c, 0xcf, 0xf1, 0xd8, 0x08, 0x57, 0xa5, 0xcc, 0x00, 0xe7, 0x40, 0xa9, 0xd9, 0x2d, 0x7c, 0xf8, 0x38, 0x37, 0x6a, 0x9c, 0x47, 0x99, 0x2b, 0x7b, 0xb1, 0x34, 0xba, 0xd8, 0x15, 0x43, 0xba, 0x65, 0x63, 0x21, 0xac, 0x97, 0x82, 0xd7, 0x06, 0xd3, 0xde, 0xdb };
+static uint8_t expected_cbc_256[] = { 0x3d, 0xa1, 0x2e, 0x1a, 0xda, 0xa3, 0x3c, 0x3f, 0x08, 0x4d, 0x15, 0x26, 0x48, 0x2d, 0x30, 0x5c, 0x28, 0x86, 0x07, 0xc3, 0xc9, 0x4e, 0xef, 0x51, 0xd6, 0xcf, 0x07, 0xe9, 0x32, 0x3b, 0xc2, 0xdb, 0xbc, 0xa4, 0xed, 0x63, 0x6d, 0x11, 0xab, 0x5b, 0x4b, 0xa6, 0xea, 0xe3, 0xaa, 0xf9, 0x33, 0xdb, 0x3a, 0xae, 0x5f, 0x1d, 0x60, 0xbd, 0x60, 0x4d, 0x74, 0x37, 0xf7, 0xf9, 0xae, 0xce, 0x86, 0xc4, 0x5f, 0x4e, 0x16, 0x63, 0xba, 0xf9, 0x3e, 0x48, 0xdd, 0xf0, 0x2c, 0x48, 0x9e, 0xdf, 0xed, 0x88, 0x97, 0x2c, 0x3b, 0xdd, 0xaa, 0xa2, 0xeb, 0xef, 0x0a, 0x12, 0xe7, 0x71, 0xb0, 0x1c, 0x42, 0x01, 0xe3, 0x23, 0xd1, 0x35, 0xdc, 0x6e, 0xd4, 0x06, 0x9f, 0x30, 0x79, 0xd9, 0x80, 0xf0, 0x23, 0x97, 0xb9, 0x03, 0x9e, 0xf6, 0xbf, 0x69, 0x2f, 0x34, 0x7b, 0x0d, 0x3e, 0x32, 0x01, 0x30, 0x4f, 0xbb };
+static uint8_t expected_ctr_128[] = { 0x30, 0xe9, 0xa7, 0x26, 0x2a, 0x43, 0xed, 0xdc, 0xb3, 0x23, 0x88, 0x73, 0x3f, 0xdf, 0x7c, 0x32, 0x01, 0x51, 0x36, 0x23, 0x07, 0xda, 0x7a, 0x72, 0xf2, 0xc6, 0xb0, 0xed, 0xc8, 0x40, 0x83, 0x9a, 0x9c, 0x5b, 0x79, 0x59, 0xe0, 0xa3, 0xb6, 0xe0, 0x13, 0xbf, 0xa8, 0x2e, 0xe9, 0xd9, 0xe5, 0xf1, 0xcc, 0x4f, 0xb2, 0x37, 0x77, 0xbb, 0xbe, 0xe8, 0xd8, 0xda, 0x58, 0xd2, 0xd6, 0x53, 0xb2, 0x5a, 0xc9, 0xfc, 0xfa, 0x57, 0xe8, 0x12, 0xd6, 0xb5, 0x91, 0x2d, 0x99, 0x37, 0xea, 0xde, 0x86, 0xbc, 0x42, 0xb6, 0x7d, 0x14, 0x91, 0xf1, 0xb8, 0x67, 0xa0, 0x58, 0x7d, 0x10, 0x46, 0xcc, 0x44, 0xba, 0xd5, 0xe7, 0x39, 0x9f, 0x09, 0x99, 0x4a, 0x51, 0xd0, 0xb2, 0x50, 0xb1, 0x01, 0x36, 0x3e, 0xff, 0x16, 0x90, 0xc8, 0x92, 0x4a, 0x03, 0xbb, 0x72, 0xc2, 0x86, 0x80, 0x87, 0xb6, 0x7c, 0xde, 0x19 };
+static uint8_t expected_ctr_192[] = { 0xd7, 0x66, 0x61, 0x49, 0x2f, 0xaa, 0xc4, 0xfe, 0xc3, 0x28, 0x03, 0xb1, 0x6d, 0x98, 0xa3, 0xf8, 0x5c, 0xbf, 0xd7, 0x3c, 0x7b, 0xac, 0x2c, 0x44, 0x92, 0xcd, 0xbe, 0x0b, 0x1d, 0xc7, 0x87, 0x84, 0x38, 0x44, 0xc4, 0x01, 0xef, 0x21, 0x23, 0x6c, 0x77, 0x79, 0xc3, 0x85, 0x79, 0x07, 0xe9, 0x9a, 0x0d, 0x6c, 0xa1, 0x8c, 0x35, 0x44, 0x1d, 0x3e, 0xf4, 0xc7, 0xef, 0x74, 0x8a, 0x31, 0xc2, 0x6e, 0xdd, 0xfc, 0xb6, 0x15, 0x31, 0x94, 0xc2, 0x87, 0xa9, 0x57, 0xae, 0x53, 0x45, 0x9c, 0xf6, 0xf8, 0x6c, 0x98, 0x2c, 0x53, 0x95, 0xc6, 0x6e, 0xcf, 0xd4, 0x3d, 0xc3, 0x42, 0xd8, 0xf7, 0xd7, 0x2e, 0x9b, 0xa3, 0xb6, 0x06, 0xc2, 0x37, 0x82, 0x11, 0xf9, 0x64, 0xd9, 0x8c, 0x7a, 0x5f, 0x10, 0x99, 0xea, 0x2f, 0xf4, 0x68, 0x10, 0xd7, 0xa3, 0x7b, 0x90, 0x86, 0x83, 0x25, 0x00, 0xf5, 0x29, 0x36 };
+static uint8_t expected_ctr_256[] = { 0x4d, 0xac, 0x24, 0xe8, 0x0e, 0xa2, 0x33, 0x3f, 0x62, 0xa6, 0xaa, 0xf6, 0xd7, 0x09, 0xf4, 0x9e, 0xd0, 0x92, 0x0a, 0x7b, 0xd5, 0xab, 0xaf, 0x37, 0x59, 0x67, 0xe0, 0x74, 0xee, 0x93, 0xef, 0x26, 0x75, 0x9f, 0x41, 0x13, 0xbe, 0x0e, 0x12, 0x80, 0xcc, 0xa5, 0x39, 0x5b, 0xca, 0xff, 0x62, 0x93, 0xa4, 0x9f, 0xa8, 0x04, 0x59, 0x8e, 0x5b, 0xfd, 0x9f, 0xc0, 0xe5, 0x3b, 0x39, 0xd1, 0xa1, 0xe4, 0x86, 0x25, 0x29, 0xa9, 0x7a, 0xe7, 0x76, 0x15, 0xed, 0xa9, 0xe3, 0xc3, 0xef, 0x95, 0xda, 0xb9, 0xd0, 0x9e, 0x68, 0xad, 0x5a, 0x4a, 0xdc, 0x14, 0x6a, 0xe4, 0xda, 0xd4, 0xa0, 0xcb, 0x95, 0xdc, 0xc9, 0xbd, 0x57, 0xc6, 0xf8, 0x1d, 0xdf, 0xe4, 0x49, 0x1e, 0x09, 0x69, 0x2f, 0xf6, 0x97, 0x84, 0xde, 0xee, 0x62, 0x7e, 0xe0, 0x8c, 0xb6, 0xb0, 0x67, 0xd5, 0xc8, 0x83, 0xd5, 0xc2, 0x83, 0xe8 };
+
+enum aes_algs { AES_ECB, AES_CBC, AES_CTR };
+static const struct {
+	size_t keylen;
+	int alg;
+	uint8_t *expected_out;
+	char *desc;
+} aes_tests[] = {
+	{ 16, AES_ECB, expected_ecb_128, "Computing AES-ECB-128 %s for %u bytes..." },
+	{ 24, AES_ECB, expected_ecb_192, "Computing AES-ECB-192 %s for %u bytes..." },
+	{ 32, AES_ECB, expected_ecb_256, "Computing AES-ECB-256 %s for %u bytes..." },
+	{ 16, AES_CBC, expected_cbc_128, "Computing AES-CBC-128 %s for %u bytes..." },
+	{ 24, AES_CBC, expected_cbc_192, "Computing AES-CBC-192 %s for %u bytes..." },
+	{ 32, AES_CBC, expected_cbc_256, "Computing AES-CBC-256 %s for %u bytes..." },
+	{ 16, AES_CTR, expected_ctr_128, "Computing AES-CTR-128 %s for %u bytes..." },
+	{ 24, AES_CTR, expected_ctr_192, "Computing AES-CTR-192 %s for %u bytes..." },
+	{ 32, AES_CTR, expected_ctr_256, "Computing AES-CTR-256 %s for %u bytes..." },
+};
+#define AES_TESTS_NUM (sizeof(aes_tests)/sizeof(aes_tests[0]))
+
+void run_aes_tests( void ) {
+	int res, i;
+	uint8_t *in = NULL, *out = NULL, *iv = NULL;
+	const size_t inlen = AES_DATA_LEN, outlen = AES_DATA_LEN;
+
+	if (!(in = malloc_cache_aligned(inlen))) {
+		printf("Could not allocate input buffer\n");
+		goto done;
+	}
+	if (!(out = malloc_cache_aligned(outlen))) {
+		printf("Could not allocate input buffer\n");
+		goto done;
+	}
+	if (!(iv = malloc_cache_aligned(16))) {
+		printf("Could not allocate IV buffer\n");
+		goto done;
+	}
+
+	memset(in, 'a', inlen);
+
+	printf("\nRunning HW accelerated AES tests...\n");
+
+	for (i = 0; i < AES_TESTS_NUM; i++) {
+		printf(aes_tests[i].desc, "enc", inlen);
+		memset(iv, 'a', 16);
+		if (aes_tests[i].alg == AES_ECB)
+			res = hw_aes_ecb_enc(in, aes_tests[i].keylen, in, inlen, out);
+		else if (aes_tests[i].alg == AES_CBC)
+			res = hw_aes_cbc_enc(in, aes_tests[i].keylen, iv, in, inlen, out);
+		else if (aes_tests[i].alg == AES_CTR)
+			res = hw_aes_ctr_enc(in, aes_tests[i].keylen, iv, in, inlen, out);
+		else
+			res = -1;
+		if (!res && !memcmp(out, aes_tests[i].expected_out, inlen))
+			printf("Success!\n");
+		else {
+			printf("Failure[0x%08x]!\n", res);
+			printf("expected out =\n");
+			seq_print_bytes(aes_tests[i].expected_out, inlen);
+			printf("computed out =\n");
+			seq_print_bytes(out, inlen);
+		}
+
+		printf(aes_tests[i].desc, "dec", inlen);
+		memset(iv, 'a', 16);
+		if (aes_tests[i].alg == AES_ECB)
+			res = hw_aes_ecb_dec(in, aes_tests[i].keylen, out, inlen, out);
+		else if (aes_tests[i].alg == AES_CBC)
+			res = hw_aes_cbc_dec(in, aes_tests[i].keylen, iv, out, inlen, out);
+		else if (aes_tests[i].alg == AES_CTR)
+			res = hw_aes_ctr_dec(in, aes_tests[i].keylen, iv, out, inlen, out);
+		else
+			res = -1;
+		if (!res && !memcmp(out, in, inlen))
+			printf("Success!\n");
+		else {
+			printf("Failure[0x%08x]!\n", res);
+			printf("expected out =\n");
+			seq_print_bytes(in, inlen);
+			printf("computed out =\n");
+			seq_print_bytes(out, inlen);
+		}
+	}
+
+	printf("Computing AES-CBC-256 enc for %u + %u bytes...", 64, inlen-64);
+	memset(iv, 'a', 16);
+	res = hw_aes_cbc_enc(in, 32, iv, in, 64, out);
+	res = hw_aes_cbc_enc(in, 32, iv, in+64, inlen-64, out+64);
+	if (!res && !memcmp(out, expected_cbc_256, inlen))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(expected_cbc_256, inlen);
+		printf("computed out =\n");
+		seq_print_bytes(out, inlen);
+	}
+
+	printf("Computing AES-CBC-256 dec for %u + %u bytes...", 64, inlen-64);
+	memset(iv, 'a', 16);
+	res = hw_aes_cbc_dec(in, 32, iv, out, 64, out);
+	res = hw_aes_cbc_dec(in, 32, iv, out+64, inlen-64, out+64);
+	if (!res && !memcmp(out, in, inlen))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(in, inlen);
+		printf("computed out =\n");
+		seq_print_bytes(out, inlen);
+	}
+
+	printf("Computing AES-CTR-256 enc for %u + %u bytes...", 64, inlen-64);
+	memset(iv, 'a', 16);
+	res = hw_aes_ctr_enc(in, 32, iv, in, 64, out);
+	memcpy(iv, out+(64-16), 16);
+	res = hw_aes_ctr_enc(in, 32, iv, in+64, inlen-64, out+64);
+	if (!res && !memcmp(out, expected_ctr_256, inlen))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(expected_ctr_256, inlen);
+		printf("computed out =\n");
+		seq_print_bytes(out, inlen);
+	}
+
+	printf("Computing AES-CTR-256 dec for %u + %u bytes...", 64, inlen-64);
+	memset(iv, 'a', 16);
+	res = hw_aes_ctr_dec(in, 32, iv, out, 64, out);
+	res = hw_aes_ctr_dec(in, 32, iv, out+64, inlen-64, out+64);
+	if (!res && !memcmp(out, in, inlen))
+		printf("Success!\n");
+	else {
+		printf("Failure!\n");
+		printf("expected out =\n");
+		seq_print_bytes(in, inlen);
+		printf("computed out =\n");
+		seq_print_bytes(out, inlen);
+	}
+
+	printf("...HW accelerated AES tests done\n\n");
+done:
+	free(in);
+	free(out);
+	free(iv);
+}
+#endif
+
+static void seq_act_test( void ) {
+#ifdef DO_HASH_TESTS
+	run_hash_tests();
+#endif
+#ifdef DO_AES_TESTS
+	run_aes_tests();
+#endif
+}
+
+void seq_act_update_dt( SeqBootPlexInfo *current_plex ) {
+	/* Computes the "MB2" and "TOS" measurements, and adds the event log to the DT for the TEE.
+	 * "MB2" and "TOS" are what nvidia measured, so we use the same
+	 * names here.  In this case, "MB2" refers to ATF, and "TOS"
+	 * to the TEE. */
+	int res;
+	uint8_t mb2_hash[SEQ_TPMEVTLOGHASH_BYTES] = { 0 };
+	uint8_t tos_hash[SEQ_TPMEVTLOGHASH_BYTES] = { 0 };
+	FTPM_DATA *ftpm_data = NULL;
+	const int fdt_size = 0x1000;
+
+	printf("Running activation with SHA of %d bytes\n", SEQ_TPMEVTLOGHASH_BYTES);
+
+	seq_act_test();
+
+	if (!(ftpm_data = malloc_cache_aligned(sizeof(FTPM_DATA)))) {
+		printf("Could not allocate space for TEE FDT\n");
+		return;
+	}
+
+	if ((res = fetch_hashes(current_plex, mb2_hash, tos_hash))) {
+		printf("Error fetching ATF and/or TEE hashes, res = %d\n", res);
+		goto done;;
+	}
+	printf("MB2 Hash:\n");
+	seq_print_bytes(mb2_hash, sizeof(mb2_hash));
+	printf("TOS Hash:\n");
+	seq_print_bytes(tos_hash, sizeof(tos_hash));
+
+	/* Compute the TPM event log */
+	if ((res = create_tpm_evt_log(ftpm_data, mb2_hash, tos_hash))) {
+		printf("Error creating TPM event log, res = %d\n", res);
+		goto done;
+	}
+
+	/* Update the DT with the computed values. */
+	if (!(res = update_dt(ftpm_data, (void*)current_plex->coreteedtb.ramaddr, fdt_size))) {
+		printf("Done tee fdt setup\n");
+	} else {
+		printf("TEE FDT setup FAILED\n");
+	}
+
+done:
+	if (res) {
+		free(ftpm_data);
+	}
+}

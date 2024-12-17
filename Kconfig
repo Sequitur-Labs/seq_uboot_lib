@@ -1,0 +1,102 @@
+config SPL_SLIPROV
+       bool "Build provisioning SPL"
+       default n
+       
+config CORETEE
+        bool "Support CoreTEE in SPL and U-Boot"
+	default n
+	help
+	  Enables CoreTEE support in SPL and U-Boot
+
+config CORETEE_GOLD
+	bool "Enable Gold System Support for CoreTEE"
+	default n
+	help
+		Enables more memory allocation for CoreTEE
+
+config SPL_CORETEE
+        bool "Support CoreTEE in SPL"
+	default n
+	help
+	  Enables CoreTEE support in SPL
+
+config SPL_ENABLE_WATCHDOG
+        bool "Enable boot watchdog in SPL"
+	default n
+	help
+	  Enables boot watchdog in SPL.
+	  
+config CORETEE_ENABLE_BLOB
+	bool "Enable BLOB support in CoreTEE"
+	default n
+	help
+	  Enables use of blobs very early
+
+config SPL_CORETEE_SET_FUSES
+	bool "Set SRKH and security fuses during provisioning."
+	default n
+	help
+		Sets the SRKH fuses for HAB.
+		
+config SPL_CORETEE_SET_LOCK_FUSES
+	bool "Locks the SRK and BOOT_CFG_fuses during provisioning."
+	default n
+	help
+		Locks the SRKH fuses for HAB.
+
+config CORETEE_USE_KEYRING
+	bool "Sets whether to handle the keyring manifest for use in Linux."
+	default n
+	help
+		Enables use of the keyring keys via a manifest for Linux.
+
+config CORETEE_USE_UBOOT_ITB
+	bool "Sets whether to parse the u-boot binary as a .itb file containing the DTBs."
+	default n
+	help
+		Sets whether to parse the u-boot binary as a .itb file containing the DTBs.
+
+config CORETEE_USE_KERNEL_ITB
+	bool "Sets whether to parse the kernel binary as a .itb file containing the DTBs and initramfs."
+	default n
+	help
+		Sets whether to parse the kernel binary as a .itb file containing the DTBs and initramfs.
+
+config CORETEE_USE_NVM_FOR_BLC
+	bool "Sets whether to load the 'Boot Loop Counter' from NVM or from a register"
+	default y
+	help
+		Sets whether to load the 'Boot Loop Counter' from NVM or from a register
+		
+#
+# Test configuration
+#
+config CORETEE_PROV_TESTS
+	bool "Enable/disable testing with the provisioning binary."
+	default n 
+	help
+		Enable/disable testing with the provisioning binary.
+
+config CORETEE_KEY_TEST
+	bool "Enable the key generation/validation test."
+	default n
+	help
+		Enable the key generation/validation test.
+		
+config CORETEE_CERT_TEST
+	bool "Enable the certificate generation/validation test."
+	default n
+	help
+		Enable the certificate generation/validation test.
+		
+config CORETEE_MEASURED_BOOT
+  bool "Enable boot measurements in U-Boot"
+	default n
+	help
+	  Performs boot measurements to the TPM in U-Boot
+
+config CORETEE_TPMEVTLOGHASH_SIZE
+  int "Set the size of the SHA digest used for event log hashes"
+	default 512
+	help
+	  Can optionally be set to 256, 384 or 512.
