@@ -1,7 +1,5 @@
 ifdef CONFIG_SPL_BUILD
 obj-y	+= uECC.o seq_ecc_utils.o seq_ecc_certificate.o
-obj-y	+= seq_asn1/seq_asn1_encode.o seq_asn1/seq_asn1_parse.o seq_asn1/seq_asn1_utils.o
-obj-y 	+= seq_manifest/seq_manifest.o seq_manifest/seq_list.o
 obj-y	+= seq_boot_manifests.o
 obj-y	+= seq_error.o
 obj-y 	+= seq_activation.o

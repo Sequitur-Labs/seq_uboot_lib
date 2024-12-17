@@ -1,3 +1,5 @@
+include/arch/imx/seq_prov_fuse_values.h
+
 # Prerequisites
 *.d
 
