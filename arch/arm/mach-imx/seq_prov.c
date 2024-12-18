@@ -111,15 +111,6 @@ struct mmc * _prov_dev=NULL;
 
 static uint8_t *_keymod = NULL;
 
-#define SEQ_CRYPT_ALIGN_SIZE 16
-static size_t seq_get_aligned_size( size_t sz )
-{
-	if (sz%SEQ_CRYPT_ALIGN_SIZE) {
-		return ((sz + (SEQ_CRYPT_ALIGN_SIZE - 1)) & ~(SEQ_CRYPT_ALIGN_SIZE - 1));
-	}
-	return sz;
-}
-
 #if IS_ENABLED(CONFIG_CORETEE_ENABLE_BLOB)
 int blob_decap(u8*,u8*,u8*,u32,u8);
 int blob_encap(u8*,u8*,u8*,u32,u8);
