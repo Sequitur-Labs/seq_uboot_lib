@@ -1,0 +1,6 @@
+[submodule "seq_manifest"]
+	path = seq_manifest
+	url = git@github.com:Sequitur-Labs/seq_boot_manifest.git
+[submodule "seq_asn1"]
+	path = seq_asn1
+	url = git@github.com:Sequitur-Labs/seq_asn1.git
