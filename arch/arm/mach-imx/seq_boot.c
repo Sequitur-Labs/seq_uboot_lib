@@ -118,7 +118,7 @@ static int atf_setup(SeqBootPlexInfo *current_plex)
 
 	//printf("Loading ATF from BLOB [0x%08lx]->[0x%08lx]\n", current_plex->atf.nvsaddr, current_plex->atf.ramaddr);
 	printf("Loading ATF from GOLD BLOB\n");
-	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->atf.nvsaddr, current_plex->atf.ramaddr, SEQ_BLOB_KEY_OTPMK);
+	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->atf.nvsaddr, current_plex->atf.ramaddr, SEQ_BLOB_KEY_OTPMK, &current_plex->atf.ramlength);
 
 #else
 
@@ -144,10 +144,10 @@ static int coretee_setup( SeqBootPlexInfo *current_plex )
 
 	//printf("Loading CoreTEE from GOLD BLOB [0x%08lx]->[0x%08lx]\n", current_plex->coretee.nvsaddr, current_plex->coretee.ramaddr);
 	printf("Loading CoreTEE from GOLD BLOB\n");
-	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->coretee.nvsaddr, current_plex->coretee.ramaddr, SEQ_BLOB_KEY_OTPMK);
+	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->coretee.nvsaddr, current_plex->coretee.ramaddr, SEQ_BLOB_KEY_OTPMK, &current_plex->coretee.ramlength);
 
 	printf("Loading CORETEE DTB from GOLD BLOB\n");
-	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->coreteedtb.nvsaddr, current_plex->coreteedtb.ramaddr, SEQ_BLOB_KEY_OTPMK );
+	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->coreteedtb.nvsaddr, current_plex->coreteedtb.ramaddr, SEQ_BLOB_KEY_OTPMK, &current_plex->coreteedtb.ramlength );
 
 #else
 
@@ -181,7 +181,7 @@ static int kernel_setup( SeqBootPlexInfo *current_plex )
 	///printf("Loading KERNEL from GOLD BLOB: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
 	printf("Loading KERNEL from GOLD BLOB\n");
 	//printf("Writing to: 0x%08lx\n", ddr);
-	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->kernel.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK);
+	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->kernel.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK, &current_plex->kernel.ramlength);
 
 #else
 
@@ -210,7 +210,7 @@ static int fdt_setup( SeqBootPlexInfo *current_plex )
 	printf("Loading FDT from GOLD BLOB: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
 	//printf("Loading FDT from GOLD BLOB\n");
 	printf("Writing to: 0x%08lx\n", ddr);
-	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->fdt.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK);
+	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->fdt.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK, &current_plex->fdt.ramlength);
 
 #else
 
@@ -253,7 +253,7 @@ static int uboot_setup(SeqBootPlexInfo *current_plex)
 #ifdef CONFIG_CORETEE_ENABLE_BLOB
 	//printf("Loading u-boot from GOLD BLOB: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->uboot.nvslength,current_plex->uboot.nvsaddr,ddr);
 	printf("Loading u-boot from GOLD BLOB\n");
-	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->uboot.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK);
+	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->uboot.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK, &current_plex->uboot.ramlength);
 #else
 	// Load un-encrypted u-boot ITB
 	printf("Loading PLAIN u-boot 0x%08lx blocks from 0x%08lx to 0x%08lx\n",

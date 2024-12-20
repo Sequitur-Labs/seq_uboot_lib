@@ -45,7 +45,7 @@
 //Location in NVM where the provisioning manifest is located.
 #define SLIPMMC CORETEE_COMPONENT_DATA_OFFSET
 
-#define DEBUG
+//#define DEBUG
 #ifdef DEBUG
 #define DMSG printf
 #else
@@ -121,40 +121,73 @@ void execute_cert_test( void );
 #endif //CONFIG_CORETEE_PROV_TESTS
 
 #if IS_ENABLED(CONFIG_CORETEE_ENABLE_BLOB)
-static int deblob_component( void *addr, uint32_t *_size )
+static int deblob_component( void *addr, uint32_t blobsize )
 {
 	int res=-1;
-	uint32_t size=*_size;
-	uint8_t *scratch = malloc_cache_aligned(size);
+	uint32_t size;
+	uint8_t *scratch = NULL;
+	SeqBlobHeaderType *header=(SeqBlobHeaderType*)addr;
+
+	if (memcmp(header->magic, SEQ_BLOB_MAGIC, SEQ_BLOB_MAGIC_LENGTH)) {
+		printf("Invalid blob!\n");
+		return res;
+	}
+
+	if (blobsize < header->totalsize) {
+		printf("Invalid size of blob\n");
+		return res;
+	}
+
+	size = header->payloadsize;
+
+	scratch = malloc_cache_aligned(size);
 	if (!scratch) {
 		printf("[%s] - Failed to allocate aligned memory!\n", __func__);
 		return res;
 	}
 
-	//Force known alignemnt
-	memcpy((void*)BSRC, addr, size);
+	//Force known alignment
+	memcpy((void*)BDST, addr+sizeof(SeqBlobHeaderType), size);
 
 	seq_select_zmk();
-	res=blob_decap((u8*)_keymod, (u8*)BSRC, (u8*)scratch, size-512, 0);
+	res=blob_decap((u8*)_keymod, (u8*)BDST, (u8*)scratch, size-512, 0);
 	if (!res) {
-		memcpy(addr, scratch, size-512);
-		*_size = size;
+		//Copy deblobbed data back to 'addr'.
+		memcpy(addr+sizeof(SeqBlobHeaderType), scratch, size);
+	} else {
+		printf("Deblobbing failed!\n");
 	}
 
 	free(scratch);
 	return res;
 }
 
-static int reblob_component( void *addr, uint32_t size )
+static int reblob_component( void *addr, uint32_t componentsize )
 {
 	int res=-1;
 	int diff=0;
-	uint8_t *plainbuffer=(uint8_t*)addr;
+	uint8_t *plainbuffer=addr;
+	uint32_t plainsize=0;
 	uint8_t *actualdest=NULL;
 	uint8_t *aligned=NULL;
 	SeqBlobHeaderType *header=NULL;
-	uint8_t *srcbuffer=(uint8_t*)malloc_cache_aligned(size);
+	uint8_t *srcbuffer=NULL;
+	uint32_t payloadsize=0;
+	uint32_t size;
 
+	header = (SeqBlobHeaderType*)addr;
+
+	if (!memcmp(header->magic, SEQ_BLOB_MAGIC, SEQ_BLOB_MAGIC_LENGTH)) {
+		//Header is at start of buffer
+		plainbuffer = addr + sizeof(SeqBlobHeaderType);
+		plainsize = header->plainsize;
+		payloadsize = header->payloadsize;
+		size = payloadsize;
+	} else {
+		size = componentsize;
+	}
+
+	srcbuffer = (uint8_t*)malloc_cache_aligned(size);
 	if (!srcbuffer) {
 		printf("[%s] - Failed to allocate aligned memory!\n", __func__);
 		return res;
@@ -163,12 +196,15 @@ static int reblob_component( void *addr, uint32_t size )
 	//BRN isn't larger than MMC block size. It wasn't encrypted...
 	diff = size > 512 ? 512 : 0;
 
+	//Copy to aligned buffer
 	memcpy(srcbuffer,plainbuffer,size);
 
-	header=(SeqBlobHeaderType*)BSRC;
+	header=(SeqBlobHeaderType*)BDST;
+	memcpy(header->magic, SEQ_BLOB_MAGIC, SEQ_BLOB_MAGIC_LENGTH);
 	header->totalsize=  diff > 0 ? size : (size + 48); /*Add blob padding*/
 	header->payloadsize=size-diff;
-	actualdest=(uint8_t*)(BSRC+sizeof(SeqBlobHeaderType));
+	header->plainsize = plainsize;
+	actualdest=(uint8_t*)(BDST+sizeof(SeqBlobHeaderType));
 	aligned=(uint8_t*)malloc_cache_aligned(header->totalsize);
 
 	if (!aligned) {
@@ -179,18 +215,17 @@ static int reblob_component( void *addr, uint32_t size )
 
 	memset(aligned,0,header->totalsize);
 
-	DMSG("Copying from: %p   to    %p     %d\n", (void*)srcbuffer, (void*)aligned, (size-diff));
+	DMSG("Encap Copying from: %p   to    %p     %d\n", (void*)srcbuffer, (void*)aligned, (size-diff));
 	seq_select_otpmk();
 	res=blob_encap((u8*)_keymod,(u8*)srcbuffer,(u8*)aligned,size-diff, 0);
-	DMSG("   %s (0x%08x)\n",(res==0) ? "SUCCESS" : "FAILED", res);
 
 	if (diff == 0) {
 		//Make sure to save blob header
-		size = header->totalsize + sizeof(SeqBlobHeaderType);
+		header->totalsize = header->totalsize + sizeof(SeqBlobHeaderType);
 	}
 
 	memcpy(actualdest,aligned,size);
-	memcpy(addr, (void*)BSRC, header->totalsize);
+	memcpy(addr, (void*)BDST, header->totalsize);
 
 	free(srcbuffer);
 	free(aligned);
@@ -392,7 +427,7 @@ static uint32_t diversify_component(SeqManifest *manifest, const char* section, 
 
 	if (!res && blobbed) {
 		printf("   Deblobbing [%d bytes]...\n", sizeval);
-		res = deblob_component(P(BSRC), &sizeval);
+		res = deblob_component(P(BSRC), sizeval);
 	}
 	if (!res && reblob) {
 		printf("   Reblobbing [%d bytes]...\n", sizeval);
@@ -400,6 +435,10 @@ static uint32_t diversify_component(SeqManifest *manifest, const char* section, 
 	}
 	if (!reblob) {
 		printf("   Not reblobbing...\n");
+		if (blobbed) {
+			printf("   Removing blob header.\n");
+			memmove(P(BSRC), P(BSRC+sizeof(SeqBlobHeaderType)), sizeval);
+		}
 	}
 	done = !res;
 #else //CONFIG_CORETEE_ENABLE_BLOB
@@ -416,6 +455,7 @@ static uint32_t diversify_component(SeqManifest *manifest, const char* section, 
 #endif //CONFIG_CORETEE_ENABLE_BLOB
 
 	if (done) {
+		printf("   Saving to NVM...\n");
 		save_to_media(media, P(BSRC), dstval, sizeval);
 	}
 	return res;
@@ -464,7 +504,7 @@ static void decrypt_manifest(SeqManifestIndex index,uintptr_t* address)
 	if (!ret) {
 		SeqBlobHeaderType header;
 		memcpy(&header, ebuffer, sizeof(SeqBlobHeaderType));
-		DMSG("totalsize: 0x%x   payloadsize: 0x%x\n",header.totalsize,header.payloadsize);
+		DMSG("totalsize: %d   payloadsize: %d\n",header.totalsize, header.payloadsize);
 		memmove(ebuffer, ebuffer+sizeof(SeqBlobHeaderType), header.totalsize-sizeof(SeqBlobHeaderType));
 		ret=blob_decap((u8*)_keymod, (u8*)ebuffer, (u8*)ddr_dest, header.payloadsize, 0);
 

@@ -4,9 +4,13 @@
 /*
  * This holds the information about a blob in memory.
  */
+#define SEQ_BLOB_MAGIC_LENGTH 8
+extern const uint8_t SEQ_BLOB_MAGIC[SEQ_BLOB_MAGIC_LENGTH];
 typedef struct {
-	uint32_t totalsize;
-	uint32_t payloadsize;
+	uint8_t magic[8];
+	uint32_t totalsize;   //Header + payload
+	uint32_t payloadsize; //Padded binary size
+	uint32_t plainsize;   //original binary size
 } SeqBlobHeaderType;
 
 typedef enum {
@@ -32,6 +36,6 @@ typedef enum {
  * key	- If 'SEQ_BLOB_KEY_ZMK' then the ZMK is selected before the operation is run.
  *    	- If 'SEQ_BLOB_KEY_OTPMK' then the OTPMK is selected before the operation is run.
  */
-int seq_blob_decapsulate( SeqBlobMemType source, uintptr_t blobaddr, uintptr_t destaddr, SeqBlobKeyType key );
+int seq_blob_decapsulate( SeqBlobMemType source, uintptr_t blobaddr, uintptr_t destaddr, SeqBlobKeyType key, size_t *plainlength );
 
 #endif /*seq_blob_h*/
