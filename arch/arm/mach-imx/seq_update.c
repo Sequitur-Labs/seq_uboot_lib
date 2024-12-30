@@ -64,11 +64,12 @@ static char* component_names[NUM_COMPONENT_NAMES]={
 		"atf"
 };
 
-#define NUM_KEY_NAMES 3
+#define NUM_KEY_NAMES 4
 static char *key_names[NUM_KEY_NAMES]={
 		"dest",
 		"jump",
-		"version"
+		"version",
+		"size"
 };
 
 static int verify_update(SeqDerNode *signode, SeqDerNode *plnode)
@@ -484,7 +485,6 @@ static void update_keys( SeqManifest *layout, SeqManifest *update, const char* c
 {
 	int i=0;
 	char keyname[32];
-	uint32_t size,tsize=0;
 	SeqParamKey *oldkey=NULL;
 	SeqParamKey *newkey=NULL;
 
@@ -500,14 +500,6 @@ static void update_keys( SeqManifest *layout, SeqManifest *update, const char* c
 		return;
 	}
 
-	memcpy(&size, newkey->value, sizeof(uint32_t));
-	tsize=size;
-	size = size/SEQ_MMC_BLOCK_SIZE;
-	if(tsize%SEQ_MMC_BLOCK_SIZE != 0) {
-		size++;
-	}
-
-	memcpy(newkey->value, &size, sizeof(uint32_t));
 	replace_key(oldkey, newkey, plex_str, keyname, layout);
 
 	for(i=0; i<NUM_KEY_NAMES; i++) {
