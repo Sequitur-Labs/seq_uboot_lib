@@ -1025,18 +1025,6 @@ static void check_cpu_rev( void ) {
 }
 #endif
 
-
-/*Watchdog Section*/
-# define SNVS_BASE 0x30370000
-# define _HPCOMR     0x04
-# define _HPSVSR     0x018
-# define _LPSVCR     0x040
-# define _HPSVCR     0x010
-# define _LPSR       0x04c
-# define _LPPGDR     0x064
-# define GLITCH_VAL  0x41736166
-# define _LPGPR0     0x090
-
 #define WDT_WCR 0
 #define WDT_WSR 2
 #define WDT_WRSR 4
@@ -1056,10 +1044,10 @@ static void secure_wdog_setup(u32 tmo_ms, u32 pre_interrupt_ms)
 	wcr = (((timeout << 8) & 0xFF00) | (WCR_WDZST | WCR_WDBG | WCR_WDE | WCR_WDT | WCR_SRS | WCR_WDA));
 	wicr = ((pre_interrupt_ms / 500) & 0x0ff) | 0x8000; // enable WIE, set/clamp pre-interrupt timeout
 
-	snvs_hpcomr = SNVS_BASE + _HPCOMR;
-	snvs_hpsvcr = SNVS_BASE + 0x10;
-	snvs_hphacivr = SNVS_BASE + 0x1c;
-	snvs_lpsvcr = SNVS_BASE + 0x40;
+	snvs_hpcomr = SNVS_BASE_ADDR + SNVS_HPCOMR;
+	snvs_hpsvcr = SNVS_BASE_ADDR + SNVS_HPSVCR;
+	snvs_hphacivr = SNVS_BASE_ADDR + SNVS_HPHACIVR;
+	snvs_lpsvcr = SNVS_BASE_ADDR + SNVS_LPSVCR;
 
 	wdog = SEQ_BOOT_WDOG;
 
@@ -1082,27 +1070,34 @@ static void lp_deglitch( uint8_t force )
 	uint32_t lpsr;
 	uint32_t hpsvsr;
 	uint32_t reg;
+	//uint32_t lpgpr0;
 
-	lpsr = __raw_readl((void *)(SNVS_BASE + _LPSR));
-	hpsvsr = __raw_readl((void *)(SNVS_BASE + _HPSVSR));
+	lpsr = __raw_readl((void *)(SNVS_BASE_ADDR + SNVS_LPSR));
+	hpsvsr = __raw_readl((void *)(SNVS_BASE_ADDR + SNVS_HPSVSR));
+
+	//printf("Low power - power supply glitch detected %d\n", (lpsr & (1<<3)));
+	//lpgpr0 = __raw_readl((void *)(SNVS_BASE_ADDR + SNVS_LPGPR0));
+	//printf("START LPGPR0: 0x%08x\n", lpgpr0);
 
 	/* clear errors */
 	if (force || (hpsvsr & 0x3f) || (lpsr & 0x01707ff)) {
-		uint32_t rst = __raw_readl((void *)(SNVS_BASE + _HPCOMR)); /* HPCOMR */
+		uint32_t rst = __raw_readl((void *)(SNVS_BASE_ADDR + SNVS_HPCOMR)); /* HPCOMR */
 
-		__raw_writel(rst | 0x10, (void *)(SNVS_BASE + _HPCOMR)); /* low power reset */
-		__raw_writel(0x03f, (void *)(SNVS_BASE + _HPSVSR)); /* clear hp errors */
-		__raw_writel(GLITCH_VAL, (void *)(SNVS_BASE + _LPPGDR)); /* write deglitch */
-		__raw_writel(0x01707ff, (void *)(SNVS_BASE + _LPSR)); /* clear lp errors */
+		//printf("Running deglitch\n");
+
+		__raw_writel(rst | 0x10, (void *)(SNVS_BASE_ADDR+SNVS_HPCOMR)); /* low power reset */
+		__raw_writel(0x03f, (void *)(SNVS_BASE_ADDR+SNVS_HPSVSR)); /* clear hp errors */
+		__raw_writel(GLITCH_VAL, (void *)(SNVS_BASE_ADDR+SNVS_GLITCH)); /* write deglitch */
+		__raw_writel(0x01707ff, (void *)(SNVS_BASE_ADDR+SNVS_LPSR)); /* clear lp errors */
 	}
 	else {
-		printf("%s(%d): NOPOR: LPGPR0: 0x%08x\n", __func__, __LINE__, __raw_readl((void *)(SNVS_BASE + _LPGPR0)));
+		printf("%s(%d): NOPOR: LPGPR0: 0x%08x\n", __func__, __LINE__, __raw_readl((void *)(SNVS_BASE_ADDR + SNVS_LPGPR0)));
 	}
 
 	//Setting NS Access to registers
-	reg = __raw_readl((void*)(SNVS_BASE + _HPCOMR)); // read HPcomr
+	reg = __raw_readl((void*)(SNVS_BASE_ADDR + SNVS_HPCOMR)); // read HPcomr
 	reg |= 0x80000000; // enable NS access to SNVS registers (for linux)
-	__raw_writel(reg, (void*)(SNVS_BASE + _HPCOMR)); // enable NS access to SNVS
+	__raw_writel(reg, (void*)(SNVS_BASE_ADDR + SNVS_HPCOMR)); // enable NS access to SNVS
 }
 
 //===============================================

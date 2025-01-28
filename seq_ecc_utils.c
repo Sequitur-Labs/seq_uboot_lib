@@ -374,7 +374,7 @@ uint32_t seq_extract_ec_signature(uint8_t **sigbuffer, size_t *sigbuffersize, Se
 
 void seq_run_sha(uint8_t *hashvalue, uint32_t hashlen, void *data, uint32_t size, SeqShaType sha)
 {
-#if defined(CONFIG_SPL_CRYPTO_SUPPORT) && defined(CONFIG_FSL_CAAM)
+#if (defined(CONFIG_SPL_CRYPTO_SUPPORT) || defined(CONFIG_TPL_CRYPTO_SUPPORT)) && defined(CONFIG_FSL_CAAM)
 	uint8_t* dataaligned=NULL;
 	uint8_t* localhash=NULL;
 	int shalen = sha == SEQ_SHA_256 ? SEQ_SHA256LEN_BYTES : SEQ_SHA1LEN_BYTES;
@@ -414,9 +414,9 @@ void seq_run_sha(uint8_t *hashvalue, uint32_t hashlen, void *data, uint32_t size
 	free(localhash);
 #else //SPL_CRYPTO && FSL_CAAM
 
-#ifdef CONFIG_SPL_HASH_SUPPORT
+#if (defined(CONFIG_SPL_BUILD) && defined(CONFIG_SPL_HASH)) || (defined(CONFIG_TPL_BUILD) && defined(CONFIG_TPL_HASH))
 	printf("Using hash_block");
-	int shalen=(sha==SEQ_SHA_256) ? SEQ_SHA256LEN : SEQ_SHA1LEN;
+	int shalen=(sha==SEQ_SHA_256) ? SEQ_SHA256LEN_BYTES : SEQ_SHA1LEN_BYTES;
 	hash_block((sha==SEQ_SHA_256) ? "sha256" : "sha1",data,size,hashvalue,&shalen);
 	
 #else // CONFIG_SPL_HASH_SUPPORT
