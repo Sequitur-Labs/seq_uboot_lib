@@ -1,12 +1,12 @@
 #include <common.h>
 #include <memalign.h>
 #include <asm/arch/clock.h>
+#include <asm/global_data.h>
 #include <fsl_sec.h>
 #include <uboot_aes.h>
 #include <mmc.h>
 #include <fuse.h>
 #include <hw_sha.h>
-#include <fsl_caam.h>
 #include <spi.h>
 #include <spi_flash.h>
 #include <linux/delay.h>
@@ -25,8 +25,11 @@
 #include <seq_blob.h>
 #include <seq_memio.h>
 #include <seq_prov.h>
+#include <seq_imx8m_regs.h>
 
 #include "seq_prov_fuse_values.h"
+
+DECLARE_GLOBAL_DATA_PTR;
 
 #if IS_ENABLED(CONFIG_CORETEE_PROV_TESTS)
 #include <seq_tests.h>
@@ -1082,12 +1085,10 @@ static void lp_deglitch( uint8_t force )
 	/* clear errors */
 	if (force || (hpsvsr & 0x3f) || (lpsr & 0x01707ff)) {
 		uint32_t rst = __raw_readl((void *)(SNVS_BASE_ADDR + SNVS_HPCOMR)); /* HPCOMR */
-
 		//printf("Running deglitch\n");
-
 		__raw_writel(rst | 0x10, (void *)(SNVS_BASE_ADDR+SNVS_HPCOMR)); /* low power reset */
 		__raw_writel(0x03f, (void *)(SNVS_BASE_ADDR+SNVS_HPSVSR)); /* clear hp errors */
-		__raw_writel(GLITCH_VAL, (void *)(SNVS_BASE_ADDR+SNVS_GLITCH)); /* write deglitch */
+		__raw_writel(SNVS_GLITCH_VAL, (void *)(SNVS_BASE_ADDR+SNVS_GLITCH)); /* write deglitch */
 		__raw_writel(0x01707ff, (void *)(SNVS_BASE_ADDR+SNVS_LPSR)); /* clear lp errors */
 	}
 	else {
@@ -1121,13 +1122,14 @@ void __noreturn seq_run_provisioning(void)
 #endif //CHECK_CPU_REV
 
 	printf("Initializing NVM device drivers...\n");
-	_emmc_dev = seq_get_mmc( CORETEE_MMC_DEV, 0, 0, 0);
-	_sd_dev = seq_get_mmc( CORETEE_SD_DEV, 0, 0, 0);
+	seq_init_nvm_dev(gd->fdt_blob);
+	_emmc_dev = seq_get_mmc( seq_mmc_dev_id, 0, 0, 0);
+	_sd_dev = seq_get_mmc( seq_sd_dev_id, 0, 0, 0);
 
-	DMSG("EMMC DEV(%d): %p\nSD DEV(%d):  %p\n", CORETEE_MMC_DEV, _emmc_dev, CORETEE_SD_DEV, _sd_dev);
+	DMSG("EMMC DEV(%d): %p\nSD DEV(%d):  %p\n", seq_mmc_dev_id, _emmc_dev, seq_sd_dev_id, _sd_dev);
 
 	/*This needs to be modified to where the gold blobs are initially stored*/
-	if (CORETEE_NVM_DEV == CORETEE_SD_DEV) {
+	if (seq_nvm_dev == seq_sd_dev_id) {
 		printf("Loading components from SD Card\n");
 		_prov_dev = _sd_dev;
 	} else {

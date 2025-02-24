@@ -13,6 +13,8 @@
 #define SNVS_GLITCH 	0x64 //LPPGDR
 #define SNVS_LPGPR		0x68
 
+#define SNVS_GLITCH_VAL  0x41736166
+
 #if defined(CONFIG_IMX8MP)
 #define SNVS_LPGPR0     0x90
 #endif

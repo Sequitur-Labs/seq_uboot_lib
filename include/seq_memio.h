@@ -3,6 +3,14 @@
 
 #define SEQ_MMC_BLOCK_SIZE 512
 
+extern int seq_mmc_dev_id; //eMMC dev ID for use with MMC drivers.
+extern int seq_sd_dev_id;
+extern int seq_nvm_dev;
+
+void seq_init_nvm_dev(const void *fdt);
+int seq_mem_read(uint32_t offset, uint32_t numbytes, void *dest);
+int seq_mem_write(uint32_t offset, uint32_t numbytes, void *dest);
+
 //Retrieve the mmc device based on the values passed in.
 struct mmc *seq_get_mmc(uint32_t dev, uint32_t ack, uint32_t part_num, uint32_t access);
 int seq_mmc_read_dev(struct mmc *seq_memio_mmc, uint32_t blockoffset, uint32_t numbytes, void *addr);

@@ -743,7 +743,11 @@ static int copy_update_to_ddr( uintptr_t *mmc_uaddr, size_t *plsize )
 	printf("Total update size: %d  %d\n", parent->rawlength, parent->length);
 
 	//Copy the whole update payload to DDR
-	seq_mmc_read_dev( update_mmc, offset, length, (void*)DDR_UPDATE_PAYLOAD_ADDR );
+	if (length%SEQ_MMC_BLOCK_SIZE) {
+		length += (SEQ_MMC_BLOCK_SIZE-((*plsize)%SEQ_MMC_BLOCK_SIZE));
+	}
+
+ 	seq_mmc_read_dev( update_mmc, offset, length, (void*)DDR_UPDATE_PAYLOAD_ADDR );
 #else //USE_UPDATE_MMC
 	//Just get the header. 512 is the MMC block size and the minimum size to copy
 	printf("Copying update header from block offset[%d] 0x%08x   to   DDR: 0x%08x\n", offset, offset, DDR_UPDATE_PAYLOAD_ADDR);

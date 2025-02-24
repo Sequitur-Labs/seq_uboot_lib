@@ -7,6 +7,7 @@
 #include "jr.h"
 #include <seq_imx8m_regs.h>
 #include "seq_secmon_regs.h"
+#include <seq_imx8m_regs.h>
 #include <seq_keys.h>
 
 
@@ -166,23 +167,16 @@ int seq_set_zmk(uint8_t *_in, size_t inLen) {
 		goto done;
 	}
 
-#define SNVS_BASE 0x30370000
-# define _HPCOMR     0x04
-# define _HPSVSR     0x018
-# define _LPSVCR     0x040
-# define _HPSVCR     0x010
-# define _LPSR       0x04c
-# define _LPPGDR     0x064
-# define GLITCH_VAL  0x41736166
 	// DEGLITCH
 	{
-		uint32_t status = seq_sec_in32((void*)SNVS_BASE+_LPSR);
+		uint32_t status = seq_sec_in32((void*)SNVS_BASE_ADDR+SNVS_LPSR);
 		if((status & (1<<3)) == (1<<3)){
-			uint32_t rst = seq_sec_in32((void *)(SNVS_BASE + 0x4)); /* HPCOMR */
-			__raw_writel(rst | 0x10, (void *)(SNVS_BASE + _HPCOMR)); /* low power reset */
-			__raw_writel(0x03f, (void *)(SNVS_BASE + _HPSVSR)); /* clear hp errors */
-			__raw_writel(GLITCH_VAL, (void *)(SNVS_BASE + _LPPGDR)); /* write deglitch */
-			__raw_writel(0x01707ff, (void *)(SNVS_BASE + _LPSR)); /* clear lp errors */
+			uint32_t rst = __raw_readl((void *)(SNVS_BASE_ADDR + SNVS_HPCOMR)); /* HPCOMR */
+			//printf("Running deglitch\n");
+			__raw_writel(rst | 0x10, (void *)(SNVS_BASE_ADDR+SNVS_HPCOMR)); /* low power reset */
+			__raw_writel(0x03f, (void *)(SNVS_BASE_ADDR+SNVS_HPSVSR)); /* clear hp errors */
+			__raw_writel(SNVS_GLITCH_VAL, (void *)(SNVS_BASE_ADDR+SNVS_GLITCH)); /* write deglitch */
+			__raw_writel(0x01707ff, (void *)(SNVS_BASE_ADDR+SNVS_LPSR)); /* clear lp errors */
 		}
 	}
 	

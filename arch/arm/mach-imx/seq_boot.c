@@ -18,6 +18,8 @@
 #include <seq_imx8m_regs.h>
 #include <seq_secmon_regs.h>
 
+DECLARE_GLOBAL_DATA_PTR;
+
 #ifdef CONFIG_CORETEE_ENABLE_BLOB
 #include <seq_blob.h>
 #include <seq_keys.h>
@@ -32,9 +34,6 @@ int blob_decap(u8*,u8*,u8*,u32);
 #define RESET_CAUSE_UNKNOWN 0
 #define RESET_CAUSE_POR 1
 #define RESET_CAUSE_WDOG 2
-
-#define GLITCH_VAL  0x41736166
-
 
 static SeqBootPlexInfo boot_plex;
 
@@ -502,7 +501,6 @@ static void decrypt_manifest(SeqManifestIndex index, uintptr_t *address)
 				size_t keysize=0;
 				uint8_t* key=get_aes_slip_key(index,&keysize);
 				size_t buffersize=cheader->cryptsize;
-
 				if (key) {
 					// this overwrites the header! Do not use cheader after this point
 					memmove(ebuffer,ebuffer+sizeof(SeqCryptSlip_t),SEQ_MANIFEST_SIZE-sizeof(SeqCryptSlip_t));
@@ -605,12 +603,12 @@ static void decrypt_manifest(SeqManifestIndex index, uintptr_t *address)
 	} // default
 	} // switch
 
-
+	//printf("Done: 0x%08x\n", ddr_dest);
 	*address = ddr_dest;
 }
 
-#define USE_LOW_POWER_GLITCH 1
-static int get_reset_cause(void)
+//#define USE_LOW_POWER_GLITCH 1
+static int seq_get_reset_cause(void)
 {
 #ifdef USE_LOW_POWER_GLITCH
 	uint32_t lpsr=0;
@@ -628,7 +626,7 @@ static int get_reset_cause(void)
 	u32 cause;
 	cause = readl(&src_regs->srsr);
 	writel(cause, &src_regs->srsr);
-	printf("Cause SRC: 0x%08x    %p\n", cause, &(src_regs->srsr));
+	//printf("Cause SRC: 0x%08x    %p\n", cause, &(src_regs->srsr));
 
 
 	//u16 wcr = readw(WDOG_IPB);
@@ -640,50 +638,34 @@ static int get_reset_cause(void)
 	switch (cause) {
 	case 0x00001:
 	case 0x00011:
-		return "POR";
+		return RESET_CAUSE_POR;
 	case 0x00004:
-	{
-		struct watchdog_regs *wdog = (struct watchdog_regs *)WDOG_IPB;
-
-		if (wdog->wrsr & 0x02) {
-			return("SECURE WATCHDOG");
-		}
-		return "CSU";
-	}
-	case 0x00008:
-		return "IPP USER";
 	case 0x00010:
-#ifdef	CONFIG_MX7
-		return "WDOG1";
-#else
-		return "WDOG";
-#endif
 	case 0x00014:
-		return "WDOG2";
-	case 0x00020:
-		return "JTAG HIGH-Z";
-	case 0x00040:
-		return "JTAG SW";
 	case 0x00080:
-		return "WDOG3";
+		return RESET_CAUSE_WDOG;
+	case 0x00008:
+	case 0x00020:
+	case 0x00040:
+		return RESET_CAUSE_UNKNOWN;
 #ifdef CONFIG_MX7
 	case 0x00100:
-		return "WDOG4";
+		return RESET_CAUSE_WDOG;
 	case 0x00200:
-		return "TEMPSENSE";
+		return RESET_CAUSE_UNKNOWN;
 #elif defined(CONFIG_MX8M)
 	case 0x00100:
-		return "WDOG2";
+		return RESET_CAUSE_WDOG;
 	case 0x00200:
-		return "TEMPSENSE";
+		return RESET_CAUSE_UNKNOWN;
 #else
 	case 0x00100:
-		return "TEMPSENSE";
+		return RESET_CAUSE_UNKNOWN;
 	case 0x10000:
-		return "WARM BOOT";
+		return RESET_CAUSE_UNKNOWN;
 #endif
 	default:
-		return "unknown reset";
+		return RESET_CAUSE_UNKNOWN;
 	}
 #endif //USE_LOW_POWER_GLITCH
 }
@@ -691,12 +673,12 @@ static int get_reset_cause(void)
 static void check_startup_registers(void)
 {
 	char buffer[64];
-	int cause = get_reset_cause();
+	int cause = seq_get_reset_cause();
 	uint32_t state = 0;
 	state = (seq_read_boot_state_values() & 0xFF);
 
 	printf(buffer, "\nReset reason: %d\nState: 0x%02x\n", cause, state);
-	if ( cause == RESET_CAUSE_POR ) {
+	if ( cause==RESET_CAUSE_POR ) {
 		//This is a power on reset. Set SEQ_BLC to max.
 		seq_check_bricked(1, state);
 		seq_set_blc_to_max();
@@ -731,7 +713,7 @@ static void lp_deglitch( uint8_t force )
 
 		__raw_writel(rst | 0x10, (void *)(SNVS_BASE_ADDR+SNVS_HPCOMR)); /* low power reset */
 		__raw_writel(0x03f, (void *)(SNVS_BASE_ADDR+SNVS_HPSVSR)); /* clear hp errors */
-		__raw_writel(GLITCH_VAL, (void *)(SNVS_BASE_ADDR+SNVS_GLITCH)); /* write deglitch */
+		__raw_writel(SNVS_GLITCH_VAL, (void *)(SNVS_BASE_ADDR+SNVS_GLITCH)); /* write deglitch */
 		__raw_writel(0x01707ff, (void *)(SNVS_BASE_ADDR+SNVS_LPSR)); /* clear lp errors */
 	}
 	else {
@@ -792,9 +774,11 @@ void __noreturn seq_run_boot_start( void )
 	printf("\nThe SPL has passed verification against SRKH in fuses.\n");
 	printf("\nRunning Sequitur Labs Secure Boot Steps.\n");
 
-	rc = get_reset_cause();
+	rc = seq_get_reset_cause();
 	if(rc == RESET_CAUSE_POR) {
 		seq_set_blc_to_max();
+	} else {
+		printf("Reset cause: %d\n", rc);
 	}
 
 	printf("BLC before deglitch: 0x%02x\n", blc);
@@ -876,9 +860,10 @@ static uint32_t get_boot_state_values( void )
 	/*
 	  read the value from SPI
 	*/
-	res = seq_mmc_read(SEQ_BOOT_STATE_MMC_OFFSET, SEQ_MMC_BLOCK_SIZE, stateblk);
-	if(res){
+	res = seq_mem_read(SEQ_BOOT_STATE_MMC_OFFSET, SEQ_MMC_BLOCK_SIZE, stateblk);
+	if (res) {
 		printf("Failed to load bootstate\n");
+		return 0;
 	}
 	memcpy((void*)(&stateval), stateblk, sizeof(uint32_t));
 	return stateval;
@@ -895,14 +880,16 @@ void seq_board_coretee_late_init( void )
 	kernelres.a0 = 0;
 	fdtres.a0 = 0;
 
+	seq_init_nvm_dev(gd->new_fdt);
+
 	printf("Getting component info from coretee\n");
 	bootstate = get_boot_state_values();
-	printf("Bootstate: %x\n", bootstate);
-	printf("Calling SMC...\n");
+	//printf("Bootstate: %x\n", bootstate);
+	//printf("Calling SMC...\n");
 	arm_smccc_smc(ARM_SMCCC_CORETEE_GET_KERNEL, bootstate, 0, 0, 0, 0, 0, 0, &kernelres);
 	arm_smccc_smc(ARM_SMCCC_CORETEE_GET_FDT, bootstate, 0, 0, 0, 0, 0, 0, &fdtres);
 
-	printf("kernelres: %ld    fdtres: %ld\n", kernelres.a0, fdtres.a0);
+	//printf("kernelres: %ld    fdtres: %ld\n", kernelres.a0, fdtres.a0);
 
 	if(kernelres.a0 == 0 && fdtres.a0 == 0){
 		uintptr_t kddr = SEQ_BOOT_COMPONENT_DDR_BASE + (kernelres.a1 * SEQ_MMC_BLOCK_SIZE);
