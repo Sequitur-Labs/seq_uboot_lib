@@ -122,7 +122,7 @@ static int atf_setup(SeqBootPlexInfo *current_plex)
 #else
 
 	// Non blobbed CORETEE
-	printf("Loading ATF MMC: 0x%08lx. Size: 0x%08lx  Loading to: 0x%08lx\n", current_plex->atf.nvsaddr, current_plex->atf.nvslength, current_plex->atf.ramaddr);
+	printf("Loading ATF binary: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->atf.nvslength,current_plex->atf.nvsaddr,current_plex->atf.ramaddr);
 	res = seq_mmc_read( current_plex->atf.nvsaddr, current_plex->atf.nvslength, (void *)current_plex->atf.ramaddr );
 
 #endif // CONFIG_CORETEE_ENABLE_BLOB
@@ -151,11 +151,13 @@ static int coretee_setup( SeqBootPlexInfo *current_plex )
 #else
 
 	// Non blobbed CORETEE
-	printf("Loading CORETEE MMC: 0x%08lx. Size: 0x%08lx  Loading to: 0x%08lx\n", current_plex->coretee.nvsaddr, current_plex->coretee.nvslength, current_plex->coretee.ramaddr);
+	printf("Loading CORETEE binary: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->coretee.nvslength,current_plex->coretee.nvsaddr,current_plex->coretee.ramaddr);
 	res = seq_mmc_read( current_plex->coretee.nvsaddr, current_plex->coretee.nvslength, (void *)current_plex->coretee.ramaddr );
 
-	printf("Loading CORETEE DTB MMC: 0x%08lx. Size: 0x%08lx  Loading to: 0x%08lx\n", current_plex->coreteedtb.nvsaddr, current_plex->coreteedtb.nvslength, current_plex->coreteedtb.ramaddr);
-	res = seq_mmc_read( current_plex->coreteedtb.nvsaddr, current_plex->coreteedtb.nvslength, (void *)current_plex->coreteedtb.ramaddr );
+	if (current_plex->coreteedtb.nvslength > 0) {
+		printf("Loading CORETEE DTB: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->coreteedtb.nvslength,current_plex->coreteedtb.nvsaddr,current_plex->coreteedtb.ramaddr);
+		res = seq_mmc_read( current_plex->coreteedtb.nvsaddr, current_plex->coreteedtb.nvslength, (void *)current_plex->coreteedtb.ramaddr );
+	}
 
 #endif // CONFIG_CORETEE_ENABLE_BLOB
 
@@ -177,7 +179,7 @@ static int kernel_setup( SeqBootPlexInfo *current_plex )
 	uintptr_t ddr = SEQ_BOOT_COMPONENT_DDR_BASE+(current_plex->kernel.nvsaddr*SEQ_MMC_BLOCK_SIZE);
 
 #ifdef CONFIG_CORETEE_ENABLE_BLOB
-	///printf("Loading KERNEL from GOLD BLOB: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
+	///printf("Loading KERNEL from GOLD BLOB: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
 	printf("Loading KERNEL from GOLD BLOB\n");
 	//printf("Writing to: 0x%08lx\n", ddr);
 	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->kernel.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK, &current_plex->kernel.ramlength);
@@ -185,7 +187,7 @@ static int kernel_setup( SeqBootPlexInfo *current_plex )
 #else
 
 	// Load un-encrypted kernel
-	printf("Loading KERNEL image: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
+	printf("Loading KERNEL image: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
 	printf("Writing to: 0x%08lx\n", ddr);
 	res = seq_mmc_read(current_plex->kernel.nvsaddr,current_plex->kernel.nvslength,(void *)ddr);
 
@@ -206,7 +208,7 @@ static int fdt_setup( SeqBootPlexInfo *current_plex )
 	uintptr_t ddr = SEQ_BOOT_COMPONENT_DDR_BASE+(current_plex->fdt.nvsaddr*SEQ_MMC_BLOCK_SIZE);
 
 #ifdef CONFIG_CORETEE_ENABLE_BLOB
-	printf("Loading FDT from GOLD BLOB: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
+	printf("Loading FDT from GOLD BLOB: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->kernel.nvslength,current_plex->kernel.nvsaddr,current_plex->kernel.ramaddr);
 	//printf("Loading FDT from GOLD BLOB\n");
 	printf("Writing to: 0x%08lx\n", ddr);
 	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->fdt.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK, &current_plex->fdt.ramlength);
@@ -214,7 +216,7 @@ static int fdt_setup( SeqBootPlexInfo *current_plex )
 #else
 
 	// Load un-encrypted kernel
-	printf("Loading FDT image: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->fdt.nvslength,current_plex->fdt.nvsaddr,current_plex->fdt.ramaddr);
+	printf("Loading FDT image: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->fdt.nvslength,current_plex->fdt.nvsaddr,current_plex->fdt.ramaddr);
 	printf("Writing to: 0x%08lx\n", ddr);
 	res = seq_mmc_read(current_plex->fdt.nvsaddr,current_plex->fdt.nvslength,(void *)ddr);
 
@@ -250,12 +252,12 @@ static int uboot_setup(SeqBootPlexInfo *current_plex)
 
 	//Decrypt or move .itb to temporary location.
 #ifdef CONFIG_CORETEE_ENABLE_BLOB
-	//printf("Loading u-boot from GOLD BLOB: 0x%08lx blocks from 0x%08lx to 0x%08lx\n",current_plex->uboot.nvslength,current_plex->uboot.nvsaddr,ddr);
+	//printf("Loading u-boot from GOLD BLOB: 0x%08lx bytes from 0x%08lx to 0x%08lx\n",current_plex->uboot.nvslength,current_plex->uboot.nvsaddr,ddr);
 	printf("Loading u-boot from GOLD BLOB\n");
 	res = seq_blob_decapsulate( SEQ_BLOB_MEM_MMC, current_plex->uboot.nvsaddr, ddr, SEQ_BLOB_KEY_OTPMK, &current_plex->uboot.ramlength);
 #else
 	// Load un-encrypted u-boot ITB
-	printf("Loading PLAIN u-boot 0x%08lx blocks from 0x%08lx to 0x%08lx\n",
+	printf("Loading PLAIN u-boot 0x%08lx bytes from 0x%08lx to 0x%08lx\n",
 			current_plex->uboot.nvslength,
 			current_plex->uboot.nvsaddr,
 			ddr);
@@ -333,7 +335,7 @@ static int uboot_setup(SeqBootPlexInfo *current_plex)
 #else //CORETEE_USE_UBOOT_ITB
 
 	//Copy deblobbed data to correct RAM location
-	printf("Copying u-boot binary to 0x%08x...\n", current_plex->uboot.ramaddr);
+	printf("Copying u-boot binary to 0x%08lx...\n", current_plex->uboot.ramaddr);
 	memcpy((void *)current_plex->uboot.ramaddr, (void*)ddr, current_plex->uboot.nvslength);
 
 #endif //CORETEE_USE_UBOOT_ITB
@@ -386,7 +388,7 @@ int seq_component_setup( void )
 	//Jump to ATF
 	image_entry = (image_entry_noargs_t)(unsigned long)current_plex->atf.ramaddr;
 
-	//printf("Calling into ATF: %p\n", image_entry);
+	//printf("Calling into ATF: %p   0x%08lx\n", image_entry, current_plex->atf.ramaddr);
 	//seq_print_bytes((void*)image_entry, 32);
 
 	printf("\n-----------------------------------------------------------------------\n");
